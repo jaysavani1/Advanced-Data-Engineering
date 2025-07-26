@@ -1,0 +1,264 @@
+# Olympic Analytics Platform Configuration Template
+# Copy this file to config/environments/{environment}.yaml and update with your values
+
+# Environment Configuration
+environment: "dev"  # dev, staging, prod
+version: "1.0.0"
+
+# Azure Configuration
+azure:
+  subscription_id: "${AZURE_SUBSCRIPTION_ID}"
+  tenant_id: "${AZURE_TENANT_ID}"
+  resource_group: "olympic-analytics-rg"
+  location: "East US"
+  
+  # Key Vault for secrets
+  key_vault:
+    name: "olympic-kv-${ENVIRONMENT}"
+    url: "https://olympic-kv-${ENVIRONMENT}.vault.azure.net/"
+
+# Data Lake Storage Configuration
+storage:
+  account_name: "olympicstorage${ENVIRONMENT}"
+  account_key: "${STORAGE_ACCOUNT_KEY}"
+  
+  # Data Lake containers
+  containers:
+    raw: "raw-data"
+    processed: "processed-data"
+    curated: "curated-data"
+    checkpoints: "checkpoints"
+    
+  # Data paths
+  paths:
+    raw: "abfss://raw-data@{account_name}.dfs.core.windows.net"
+    processed: "abfss://processed-data@{account_name}.dfs.core.windows.net"
+    curated: "abfss://curated-data@{account_name}.dfs.core.windows.net"
+
+# Event Hubs Configuration
+event_hubs:
+  namespace: "olympic-events-${ENVIRONMENT}"
+  connection_string: "${EVENT_HUB_CONNECTION_STRING}"
+  
+  hubs:
+    olympics_data:
+      name: "olympics-data"
+      consumer_group: "$Default"
+      partition_count: 4
+      
+    real_time_events:
+      name: "real-time-events"
+      consumer_group: "$Default"
+      partition_count: 8
+
+# Databricks Configuration
+databricks:
+  workspace_url: "https://olympic-db-${ENVIRONMENT}.azuredatabricks.net"
+  access_token: "${DATABRICKS_ACCESS_TOKEN}"
+  
+  # Cluster configuration
+  cluster:
+    name: "olympic-processing-cluster"
+    node_type: "Standard_DS3_v2"
+    min_workers: 1
+    max_workers: 4
+    auto_termination_minutes: 60
+    
+  # Notebook paths
+  notebooks:
+    data_ingestion: "/Shared/OlympicAnalytics/01_DataIngestion"
+    data_processing: "/Shared/OlympicAnalytics/02_DataProcessing"
+    data_quality: "/Shared/OlympicAnalytics/03_DataQuality"
+    analytics: "/Shared/OlympicAnalytics/04_Analytics"
+
+# Synapse Analytics Configuration
+synapse:
+  workspace_name: "olympic-synapse-${ENVIRONMENT}"
+  sql_pool_name: "olympic-sql-pool"
+  spark_pool_name: "olympic-spark-pool"
+  
+  # Connection details
+  server: "olympic-synapse-${ENVIRONMENT}.sql.azuresynapse.net"
+  database: "olympic-analytics"
+  username: "${SYNAPSE_USERNAME}"
+  password: "${SYNAPSE_PASSWORD}"
+
+# Data Factory Configuration
+data_factory:
+  name: "olympic-adf-${ENVIRONMENT}"
+  resource_group: "olympic-analytics-rg"
+  
+  # Pipeline configurations
+  pipelines:
+    data_ingestion:
+      name: "OlympicDataIngestion"
+      schedule: "0 */6 * * *"  # Every 6 hours
+      
+    data_processing:
+      name: "OlympicDataProcessing"
+      schedule: "0 2 * * *"    # Daily at 2 AM
+      
+    data_quality:
+      name: "OlympicDataQuality"
+      schedule: "0 3 * * *"    # Daily at 3 AM
+
+# Kafka Configuration (for local development)
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic_olympics: "olympics-data"
+  topic_events: "olympic-events"
+  
+  # Producer configuration
+  producer:
+    acks: "all"
+    retries: 3
+    batch_size: 16384
+    linger_ms: 10
+    
+  # Consumer configuration
+  consumer:
+    group_id: "olympic-consumer-group"
+    auto_offset_reset: "earliest"
+    enable_auto_commit: false
+
+# Data Quality Configuration
+data_quality:
+  # Validation rules
+  rules:
+    athletes:
+      required_fields: ["name", "country", "discipline"]
+      data_types:
+        name: "string"
+        country: "string"
+        discipline: "string"
+      constraints:
+        name_min_length: 2
+        country_valid_codes: true
+        
+    medals:
+      required_fields: ["country", "gold", "silver", "bronze"]
+      data_types:
+        country: "string"
+        gold: "integer"
+        silver: "integer"
+        bronze: "integer"
+      constraints:
+        medal_counts_non_negative: true
+        
+    teams:
+      required_fields: ["team_name", "country", "discipline"]
+      data_types:
+        team_name: "string"
+        country: "string"
+        discipline: "string"
+        
+  # Quality thresholds
+  thresholds:
+    completeness: 0.95
+    accuracy: 0.90
+    consistency: 0.85
+    
+  # Alerting
+  alerts:
+    email_recipients: ["data-team@company.com"]
+    slack_webhook: "${SLACK_WEBHOOK_URL}"
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "json"
+  
+  # Output destinations
+  handlers:
+    console:
+      enabled: true
+      level: "INFO"
+      
+    file:
+      enabled: true
+      level: "DEBUG"
+      path: "logs/olympic-analytics.log"
+      max_size: "100MB"
+      backup_count: 5
+      
+    azure_monitor:
+      enabled: true
+      connection_string: "${APPLICATION_INSIGHTS_CONNECTION_STRING}"
+
+# Monitoring Configuration
+monitoring:
+  # Metrics collection
+  metrics:
+    enabled: true
+    interval: 60  # seconds
+    
+  # Health checks
+  health_checks:
+    enabled: true
+    interval: 300  # seconds
+    
+  # Performance monitoring
+  performance:
+    enabled: true
+    slow_query_threshold: 30  # seconds
+
+# Security Configuration
+security:
+  # Authentication
+  auth:
+    type: "service_principal"  # service_principal, managed_identity
+    
+  # Encryption
+  encryption:
+    at_rest: true
+    in_transit: true
+    
+  # Network security
+  network:
+    allowed_ips: []
+    vnet_integration: true
+
+# Application Configuration
+app:
+  # API settings
+  api:
+    host: "0.0.0.0"
+    port: 8000
+    workers: 4
+    
+  # Cache settings
+  cache:
+    redis_url: "${REDIS_URL}"
+    ttl: 3600  # seconds
+    
+  # Rate limiting
+  rate_limit:
+    requests_per_minute: 100
+    burst_size: 20
+
+# External APIs
+external_apis:
+  olympic_api:
+    base_url: "https://api.olympics.com"
+    api_key: "${OLYMPIC_API_KEY}"
+    timeout: 30
+    
+  sports_api:
+    base_url: "https://api.sports.com"
+    api_key: "${SPORTS_API_KEY}"
+    timeout: 30
+
+# Development Configuration
+development:
+  # Debug mode
+  debug: false
+  
+  # Test data
+  test_data:
+    enabled: true
+    path: "data/test/"
+    
+  # Mock external services
+  mocks:
+    enabled: false
+    services: ["kafka", "event_hubs", "storage"] 
