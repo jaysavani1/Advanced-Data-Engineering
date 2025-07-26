@@ -1,0 +1,248 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Olympic Analytics Platform - Data Ingestion
+# MAGIC 
+# MAGIC This notebook handles data ingestion for the Olympic Analytics Platform.
+# MAGIC 
+# MAGIC ## Overview
+# MAGIC - Loads data from Azure Data Lake Storage
+# MAGIC - Performs initial data validation
+# MAGIC - Stores data in the raw zone
+# MAGIC - Triggers downstream processing
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Configuration Setup
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Configuration
+import json
+import os
+from datetime import datetime
+
+# Load configuration from widgets or environment
+dbutils.widgets.text("config_path", "", "Configuration Path")
+dbutils.widgets.text("environment", "dev", "Environment")
+
+config_path = dbutils.widgets.get("config_path")
+environment = dbutils.widgets.get("environment")
+
+# Load configuration
+if config_path:
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+else:
+    # Default configuration for development
+    config = {
+        "storage": {
+            "account_name": "olympicstoragedev",
+            "containers": {
+                "raw": "raw-data",
+                "processed": "processed-data"
+            }
+        },
+        "data_quality": {
+            "thresholds": {
+                "completeness": 0.95,
+                "accuracy": 0.90
+            }
+        }
+    }
+
+print(f"Configuration loaded for environment: {environment}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Mount Storage
+
+# COMMAND ----------
+
+# DBTITLE 1,Mount Azure Data Lake Storage
+# Mount configuration for Azure Data Lake Storage
+storage_account = config["storage"]["account_name"]
+raw_container = config["storage"]["containers"]["raw"]
+processed_container = config["storage"]["containers"]["processed"]
+
+# Mount raw data container
+raw_mount_point = "/mnt/raw-data"
+if not dbutils.fs.mounts():
+    dbutils.fs.mount(
+        source=f"abfss://{raw_container}@{storage_account}.dfs.core.windows.net",
+        mount_point=raw_mount_point,
+        extra_configs={
+            "fs.azure.account.auth.type": "OAuth",
+            "fs.azure.account.oauth.provider.type": "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider",
+            "fs.azure.account.oauth2.client.id": dbutils.secrets.get(scope="olympic-kv", key="client-id"),
+            "fs.azure.account.oauth2.client.secret": dbutils.secrets.get(scope="olympic-kv", key="client-secret"),
+            "fs.azure.account.oauth2.client.endpoint": dbutils.secrets.get(scope="olympic-kv", key="oauth-endpoint")
+        }
+    )
+
+# Mount processed data container
+processed_mount_point = "/mnt/processed-data"
+if not dbutils.fs.mounts():
+    dbutils.fs.mount(
+        source=f"abfss://{processed_container}@{storage_account}.dfs.core.windows.net",
+        mount_point=processed_mount_point,
+        extra_configs={
+            "fs.azure.account.auth.type": "OAuth",
+            "fs.azure.account.oauth.provider.type": "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider",
+            "fs.azure.account.oauth2.client.id": dbutils.secrets.get(scope="olympic-kv", key="client-id"),
+            "fs.azure.account.oauth2.client.secret": dbutils.secrets.get(scope="olympic-kv", key="client-secret"),
+            "fs.azure.account.oauth2.client.endpoint": dbutils.secrets.get(scope="olympic-kv", key="oauth-endpoint")
+        }
+    )
+
+print("Storage mounted successfully")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Load Raw Data
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Olympic Data Files
+from pyspark.sql.functions import col, current_timestamp, lit
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
+
+# Load athletes data
+athletes_df = spark.read.format("csv").option("header", "true").option("inferSchema", "true").load(f"{raw_mount_point}/athletes.csv")
+
+# Load medals data
+medals_df = spark.read.format("csv").option("header", "true").option("inferSchema", "true").load(f"{raw_mount_point}/medals.csv")
+
+# Load teams data
+teams_df = spark.read.format("csv").option("header", "true").option("inferSchema", "true").load(f"{raw_mount_point}/teams.csv")
+
+# Load coaches data
+coaches_df = spark.read.format("csv").option("header", "true").option("inferSchema", "true").load(f"{raw_mount_point}/coaches.csv")
+
+print(f"Athletes data loaded: {athletes_df.count()} records")
+print(f"Medals data loaded: {medals_df.count()} records")
+print(f"Teams data loaded: {teams_df.count()} records")
+print(f"Coaches data loaded: {coaches_df.count()} records")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Data Validation
+
+# COMMAND ----------
+
+# DBTITLE 1,Perform Data Quality Checks
+def validate_data_quality(df, dataset_name):
+    """Validate data quality for a dataset."""
+    total_rows = df.count()
+    
+    # Check for null values
+    null_counts = {}
+    for column in df.columns:
+        null_count = df.filter(col(column).isNull()).count()
+        null_counts[column] = null_count
+    
+    # Calculate completeness
+    completeness = {}
+    for column in df.columns:
+        completeness[column] = (total_rows - null_counts[column]) / total_rows if total_rows > 0 else 0
+    
+    # Check for duplicates
+    duplicate_count = df.count() - df.dropDuplicates().count()
+    
+    print(f"\n=== {dataset_name} Data Quality Report ===")
+    print(f"Total records: {total_rows}")
+    print(f"Null value counts: {null_counts}")
+    print(f"Completeness: {completeness}")
+    print(f"Duplicate records: {duplicate_count}")
+    
+    return {
+        "total_rows": total_rows,
+        "null_counts": null_counts,
+        "completeness": completeness,
+        "duplicate_count": duplicate_count
+    }
+
+# Validate each dataset
+athletes_quality = validate_data_quality(athletes_df, "Athletes")
+medals_quality = validate_data_quality(medals_df, "Medals")
+teams_quality = validate_data_quality(teams_df, "Teams")
+coaches_quality = validate_data_quality(coaches_df, "Coaches")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Data Enrichment
+
+# COMMAND ----------
+
+# DBTITLE 1,Add Metadata and Timestamps
+# Add ingestion metadata to each dataset
+def add_metadata(df, dataset_name):
+    """Add metadata columns to the dataset."""
+    return df.withColumn("ingestion_timestamp", current_timestamp()) \
+             .withColumn("dataset_name", lit(dataset_name)) \
+             .withColumn("environment", lit(environment))
+
+# Add metadata to all datasets
+athletes_enriched = add_metadata(athletes_df, "athletes")
+medals_enriched = add_metadata(medals_df, "medals")
+teams_enriched = add_metadata(teams_df, "teams")
+coaches_enriched = add_metadata(coaches_df, "coaches")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Store Processed Data
+
+# COMMAND ----------
+
+# DBTITLE 1,Save Enriched Data
+# Save enriched data to processed zone
+athletes_enriched.write.mode("overwrite").parquet(f"{processed_mount_point}/athletes")
+medals_enriched.write.mode("overwrite").parquet(f"{processed_mount_point}/medals")
+teams_enriched.write.mode("overwrite").parquet(f"{processed_mount_point}/teams")
+coaches_enriched.write.mode("overwrite").parquet(f"{processed_mount_point}/coaches")
+
+print("Enriched data saved to processed zone")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Generate Ingestion Report
+
+# COMMAND ----------
+
+# DBTITLE 1,Create Ingestion Summary
+# Create ingestion summary
+ingestion_summary = {
+    "timestamp": datetime.utcnow().isoformat(),
+    "environment": environment,
+    "datasets": {
+        "athletes": {
+            "record_count": athletes_quality["total_rows"],
+            "completeness": min(athletes_quality["completeness"].values()) if athletes_quality["completeness"] else 0
+        },
+        "medals": {
+            "record_count": medals_quality["total_rows"],
+            "completeness": min(medals_quality["completeness"].values()) if medals_quality["completeness"] else 0
+        },
+        "teams": {
+            "record_count": teams_quality["total_rows"],
+            "completeness": min(teams_quality["completeness"].values()) if teams_quality["completeness"] else 0
+        },
+        "coaches": {
+            "record_count": coaches_quality["total_rows"],
+            "completeness": min(coaches_quality["completeness"].values()) if coaches_quality["completeness"] else 0
+        }
+    }
+}
+
+# Save ingestion summary
+summary_df = spark.createDataFrame([ingestion_summary])
+summary_df.write.mode("overwrite").json(f"{processed_mount_point}/ingestion_summary")
+
+print("Ingestion completed successfully!")
+print(f"Ingestion Summary: {ingestion_summary}") 
