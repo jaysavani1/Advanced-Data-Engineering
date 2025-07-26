@@ -1,6 +1,8 @@
 # Olympic Analytics Platform
 
 A production-ready data engineering platform for Olympic Games analytics and global sports insights.
+<img width="645" height="355" alt="image" src="https://github.com/user-attachments/assets/80ecf01c-e6aa-4f6c-ab87-bbe6de4eda55" />
+
 
 ## 🏗️ Architecture Overview
 
