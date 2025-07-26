@@ -1,0 +1,263 @@
+# Olympic Analytics Platform - Azure DevOps Pipeline
+# This pipeline handles CI/CD for the entire platform
+
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    include:
+    - src/**
+    - notebooks/**
+    - terraform/**
+    - config/**
+
+pr:
+  branches:
+    include:
+    - main
+    - develop
+
+variables:
+  python.version: '3.8'
+  environment: 'dev'
+  project.name: 'olympic-analytics'
+
+stages:
+- stage: Build
+  displayName: 'Build and Test'
+  jobs:
+  - job: BuildAndTest
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(python.version)'
+        addToPath: true
+    
+    - script: |
+        python -m pip install --upgrade pip
+      displayName: 'Upgrade pip'
+    
+    - script: |
+        pip install -r requirements.txt
+      displayName: 'Install dependencies'
+    
+    - script: |
+        pip install pytest pytest-cov flake8 black mypy
+      displayName: 'Install development dependencies'
+    
+    - script: |
+        python -m flake8 src/ --max-line-length=120 --ignore=E203,W503
+      displayName: 'Lint code'
+    
+    - script: |
+        python -m black --check src/
+      displayName: 'Check code formatting'
+    
+    - script: |
+        python -m mypy src/ --ignore-missing-imports
+      displayName: 'Type checking'
+    
+    - script: |
+        python -m pytest src/tests/ --cov=src --cov-report=xml --cov-report=html
+      displayName: 'Run tests'
+    
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/test-results.xml'
+        mergeTestResults: true
+        testRunTitle: 'Python Tests'
+      condition: succeededOrFailed()
+    
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '**/coverage.xml'
+        reportDirectory: '**/htmlcov'
+      condition: succeededOrFailed()
+    
+    - task: ArchiveFiles@2
+      inputs:
+        rootFolderOrFile: 'src/'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/olympic-analytics.zip'
+        replaceExistingArchive: true
+    
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)'
+        artifactName: 'drop'
+
+- stage: DeployInfrastructure
+  displayName: 'Deploy Infrastructure'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployToDev
+    environment: 'dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: TerraformInstaller@0
+            inputs:
+              terraformVersion: 'latest'
+            displayName: 'Install Terraform'
+          
+          - task: TerraformTaskV4@4
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+              backendServiceArm: 'Azure-Service-Connection'
+              backendAzureRmResourceGroupName: 'terraform-state-rg'
+              backendAzureRmStorageAccountName: 'tfstateolympic'
+              backendAzureRmContainerName: 'tfstate'
+              backendAzureRmKey: 'olympic-analytics.terraform.tfstate'
+            displayName: 'Terraform Init'
+          
+          - task: TerraformTaskV4@4
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+              environmentServiceNameAzureRM: 'Azure-Service-Connection'
+              commandOptions: '-var="environment=dev"'
+            displayName: 'Terraform Plan'
+          
+          - task: TerraformTaskV4@4
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+              environmentServiceNameAzureRM: 'Azure-Service-Connection'
+              commandOptions: '-var="environment=dev" -auto-approve'
+            displayName: 'Terraform Apply'
+
+- stage: DeployApplication
+  displayName: 'Deploy Application'
+  dependsOn: DeployInfrastructure
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployToDev
+    environment: 'dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: 'drop'
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(python.version)'
+              addToPath: true
+          
+          - script: |
+              pip install -r requirements.txt
+            displayName: 'Install dependencies'
+          
+          - script: |
+              # Create configuration file
+              cp config/templates/config.template.yaml config/environments/dev.yaml
+            displayName: 'Setup configuration'
+          
+          - script: |
+              # Run data quality tests
+              python -m pytest src/tests/test_data_quality.py -v
+            displayName: 'Run data quality tests'
+          
+          - script: |
+              # Deploy to Azure Functions (if applicable)
+              echo "Deploying application components..."
+            displayName: 'Deploy application'
+
+- stage: DeployToStaging
+  displayName: 'Deploy to Staging'
+  dependsOn: DeployApplication
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployToStaging
+    environment: 'staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: TerraformTaskV4@4
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+              environmentServiceNameAzureRM: 'Azure-Service-Connection'
+              commandOptions: '-var="environment=staging" -auto-approve'
+            displayName: 'Deploy Staging Infrastructure'
+          
+          - script: |
+              # Deploy application to staging
+              echo "Deploying to staging environment..."
+            displayName: 'Deploy to Staging'
+
+- stage: DeployToProduction
+  displayName: 'Deploy to Production'
+  dependsOn: DeployToStaging
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployToProduction
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: TerraformTaskV4@4
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+              environmentServiceNameAzureRM: 'Azure-Service-Connection'
+              commandOptions: '-var="environment=prod" -auto-approve'
+            displayName: 'Deploy Production Infrastructure'
+          
+          - script: |
+              # Deploy application to production
+              echo "Deploying to production environment..."
+            displayName: 'Deploy to Production'
+
+- stage: PostDeployment
+  displayName: 'Post-Deployment Tests'
+  dependsOn: DeployToProduction
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: PostDeploymentTests
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(python.version)'
+        addToPath: true
+    
+    - script: |
+        pip install -r requirements.txt
+      displayName: 'Install dependencies'
+    
+    - script: |
+        # Run integration tests
+        python -m pytest src/tests/test_integration.py -v
+      displayName: 'Run integration tests'
+    
+    - script: |
+        # Run performance tests
+        python -m pytest src/tests/test_performance.py -v
+      displayName: 'Run performance tests'
+    
+    - script: |
+        # Send notification
+        echo "Deployment completed successfully!"
+      displayName: 'Send notification' 
